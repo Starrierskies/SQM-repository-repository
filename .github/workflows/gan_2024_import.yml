@@ -3,25 +3,30 @@ name: GaN 2024 Import (monthly upsert)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 5 2 * *"
+    - cron: "0 0 1 * *" # runs on the 1st of every month at midnight UTC
 
 jobs:
   import-gan-2024:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
-      - name: Install deps
-        run: pip install pandas requests python-dateutil
-
-      - name: Show files (debug)
-        run: ls -R
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas requests python-dateutil supabase
 
       - name: Run importer script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE }}
         run: python scripts/fetch_globe_at_night_2024.py
