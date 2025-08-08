@@ -3,92 +3,23 @@ name: GaN 2024 Import (monthly upsert)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 5 2 * *"   # 05:00 UTC on the 2nd of each month
+    - cron: "0 0 1 * *" # 1st of each month
 
 jobs:
   import-gan-2024:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v3
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
+          python-version: "3.10"
       - name: Install dependencies
-        run: pip install pandas requests python-dateutil
-
-      - name: Import GaN 2024 (inline)
+        run: |
+          pip install pandas requests supabase
+      - name: Run import
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python - <<'PY'
-          import os, io, json, requests, pandas as pd
-          from dateutil import parser as dtp
-
-          SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-          SERVICE_KEY  = os.environ["SUPABASE_SERVICE_ROLE"]
-          TABLE = "sqm_readings"
-          GAN_CSV_URL = "https://globeatnight.org/documents/926/GaN2024.csv"
-
-          def build_iso_utc(date_str, time_str):
-              if pd.isna(date_str) or pd.isna(time_str):
-                  return None
-              s = f"{str(date_str).strip()} {str(time_str).strip()} UTC"
-              try:
-                  dt = dtp.parse(s)
-                  iso = dt.isoformat()
-                  if iso.endswith("Z"): return iso
-                  return iso.replace("+00:00","Z") if "+00:00" in iso else iso + "Z"
-              except Exception:
-                  return None
-
-          # Download CSV
-          r = requests.get(GAN_CSV_URL, timeout=180)
-          r.raise_for_status()
-          df = pd.read_csv(io.StringIO(r.text))
-          print("Downloaded rows:", len(df))
-
-          # Ensure expected columns
-          for col in ["UTDate","UTTime","Latitude","Longitude"]:
-              if col not in df.columns:
-                  raise RuntimeError(f"Missing column: {col}")
-
-          # Build fields
-          df = df.copy()
-          df["timestamp_utc"] = [build_iso_utc(d, t) for d, t in zip(df["UTDate"], df["UTTime"])]
-          df["latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
-          df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
-          df["SQMReading"]  = pd.to_numeric(df.get("SQMReading"), errors="coerce")
-          df["LimitingMag"] = pd.to_numeric(df.get("LimitingMag"), errors="coerce")
-
-          # Filter essentials + sane ranges (avoid numeric overflow)
-          m_ess = df["timestamp_utc"].notna() & df["latitude"].notna() & df["longitude"].notna()
-          m_bri = df["SQMReading"].isna()  | ((df["SQMReading"]  >= 8.0) & (df["SQMReading"]  <= 25.0))
-          m_lim = df["LimitingMag"].isna() | ((df["LimitingMag"] >= 0.0) & (df["LimitingMag"] <= 9.9))
-          df = df[m_ess & m_bri & m_lim].reset_index(drop=True)
-
-          # Device type
-          has_sqm = df["SQMReading"].notna()
-          if "SQMSerial" in df.columns:
-              df["device_type"] = df["SQMSerial"].where(has_sqm, other="visual")
-          else:
-              df["device_type"] = has_sqm.map(lambda x: "SQM-unknown" if x else "visual")
-
-          # Notes
-          note_fields = [c for c in ["CloudCover","Constellation","SkyComment","LocationComment","Country"] if c in df.columns]
-          def mk_notes(row):
-              parts = []
-              for c in note_fields:
-                  v = row[c]
-                  if pd.notna(v) and str(v).strip() != "":
-                      parts.append(f"{c}={v}")
-              return "; ".join(parts) if parts else None
-          df["notes"] = df.apply(mk_notes, axis=1) if note_fields else None
-
-          # Standard fields for insert
-          df["sky_brightness_mag_arcsec2"] = df["SQMReading"]
-          df["limiti]()
+          python scripts/fetch_globe_at_night_2024.py
