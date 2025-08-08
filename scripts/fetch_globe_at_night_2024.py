@@ -1,60 +1,68 @@
-import os, io, json, requests
 import pandas as pd
-from dateutil import parser as dtp
+import requests
+import io
+from datetime import datetime
+from supabase import create_client
+import os
 
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SERVICE_KEY  = os.environ["SUPABASE_SERVICE_ROLE"]
-TABLE        = "sqm_readings"
+# Supabase credentials
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-GAN_CSV_URL  = "https://globeatnight.org/documents/926/GaN2024.csv"
+# Data source URL
+GAN_URL = "https://globeatnight.org/documents/926/GaN2024.csv"
 
-REQ_COLS = ["UTDate","UTTime","Latitude","Longitude"]
-
-def download_csv(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=180)
-    r.raise_for_status()
-    return pd.read_csv(io.StringIO(r.text))
-
-def build_iso_utc(date_str: str, time_str: str) -> str | None:
-    if pd.isna(date_str) or pd.isna(time_str):
-        return None
-    s = f"{str(date_str).strip()} {str(time_str).strip()} UTC"
+def build_iso_utc(date_str, time_str):
+    """Combine UTDate + UTTime into ISO8601 UTC timestamp."""
     try:
-        dt = dtp.parse(s)
-        iso = dt.isoformat()
-        if iso.endswith("Z"):
-            return iso
-        return iso.replace("+00:00","Z") if "+00:00" in iso else iso + "Z"
+        return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").isoformat() + "Z"
     except Exception:
         return None
 
-def normalize(df: pd.DataFrame) -> pd.DataFrame:
-    # Ensure required columns
-    for c in REQ_COLS:
-        if c not in df.columns:
-            raise RuntimeError(f"Missing expected column: {c}")
+def main():
+    print("Downloading GaN 2024…")
+    r = requests.get(GAN_URL)
+    r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
 
-    # Work on a copy
-    df = df.copy()
+    # Clean column names
+    df.columns = [c.strip() for c in df.columns]
 
-    # Coerce numerics where present
-    if "SQMReading" in df.columns:
-        df["SQMReading"] = pd.to_numeric(df["SQMReading"], errors="coerce")
-    else:
-        df["SQMReading"] = pd.NA
-
-    if "LimitingMag" in df.columns:
-        df["LimitingMag"] = pd.to_numeric(df["LimitingMag"], errors="coerce")
-    else:
-        df["LimitingMag"] = pd.NA
-
-    # Build timestamp + coords
+    # Build timestamp
     df["timestamp_utc"] = df.apply(lambda r: build_iso_utc(r.get("UTDate"), r.get("UTTime")), axis=1)
-    df["latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
+
+    # Numeric cleaning for SQMReading
+    df["SQMReading"] = pd.to_numeric(df["SQMReading"], errors="coerce")
+    df["sky_brightness_mag_arcsec2"] = df["SQMReading"]
+
+    # Rename + add metadata
+    df["latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
     df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+    df["device_type"] = df["ObsType"]
+    df["source_tag"] = "globe_at_night"
+    df["country"] = df["Country"]
+    df["cloud_cover"] = df["CloudCover"]
 
-    # Drop rows missing essentials
-    df = df.dropna(subset=["timestamp_utc","latitude","longitude"])
+    # Keep only columns your table can accept
+    df_out = df[[
+        "timestamp_utc",
+        "latitude",
+        "longitude",
+        "device_type",
+        "sky_brightness_mag_arcsec2",
+        "source_tag",
+        "country",
+        "cloud_cover"
+    ]]
 
-    # Map observables
-    df["sky_brightness_mag_arcsec2"] = df["SQMRe]()_]()
+    # Drop rows with no coords or no timestamp
+    df_out = df_out.dropna(subset=["timestamp_utc", "latitude", "longitude"])
+
+    print(f"Downloaded {len(df)} rows.")
+    print(f"Prepared {len(df_out)} rows for upsert.")
+
+    # Push to Supabase
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    batch_size = 500
+    for start in range(0, len
