@@ -1,0 +1,107 @@
+import os, io, json, requests
+import pandas as pd
+from dateutil import parser as dtp
+
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SERVICE_KEY  = os.environ["SUPABASE_SERVICE_ROLE"]
+TABLE        = "sqm_readings"
+GAN_CSV_URL  = "https://globeatnight.org/documents/926/GaN2024.csv"
+
+def build_iso_utc(date_str, time_str):
+    if pd.isna(date_str) or pd.isna(time_str):
+        return None
+    s = f"{str(date_str).strip()} {str(time_str).strip()} UTC"
+    try:
+        dt = dtp.parse(s)
+        iso = dt.isoformat()
+        if iso.endswith("Z"):
+            return iso
+        return iso.replace("+00:00","Z") if "+00:00" in iso else iso + "Z"
+    except Exception:
+        return None
+
+def main():
+    # Download CSV
+    r = requests.get(GAN_CSV_URL, timeout=180)
+    r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    print("Downloaded rows:", len(df))
+
+    # Validate expected columns
+    for col in ["UTDate","UTTime","Latitude","Longitude"]:
+        if col not in df.columns:
+            raise RuntimeError(f"Missing column: {col}")
+
+    df = df.copy()
+
+    # Build normalized columns
+    df["timestamp_utc"] = [build_iso_utc(d, t) for d, t in zip(df["UTDate"], df["UTTime"])]
+    df["latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+    df["SQMReading"]  = pd.to_numeric(df.get("SQMReading"), errors="coerce")
+    df["LimitingMag"] = pd.to_numeric(df.get("LimitingMag"), errors="coerce")
+
+    # Filter: essentials + sane ranges (avoid numeric overflow in DB)
+    essential_mask = df["timestamp_utc"].notna() & df["latitude"].notna() & df["longitude"].notna()
+    brightness_ok  = df["SQMReading"].isna()  | ((df["SQMReading"]  >= 8.0) & (df["SQMReading"]  <= 25.0))
+    limiting_ok    = df["LimitingMag"].isna() | ((df["LimitingMag"] >= 0.0) & (df["LimitingMag"] <= 9.9))
+    df = df[essential_mask & brightness_ok & limiting_ok].reset_index(drop=True)
+
+    # Device type
+    has_sqm = df["SQMReading"].notna()
+    if "SQMSerial" in df.columns:
+        df["device_type"] = df["SQMSerial"].where(has_sqm, other="visual")
+    else:
+        df["device_type"] = has_sqm.map(lambda x: "SQM-unknown" if x else "visual")
+
+    # Notes
+    keep_notes = [c for c in ["CloudCover","Constellation","SkyComment","LocationComment","Country"] if c in df.columns]
+    if keep_notes:
+        def mk_notes(row):
+            parts = []
+            for c in keep_notes:
+                v = row[c]
+                if pd.notna(v) and str(v).strip() != "":
+                    parts.append(f"{c}={v}")
+            return "; ".join(parts) if parts else None
+        df["notes"] = df.apply(mk_notes, axis=1)
+    else:
+        df["notes"] = None
+
+    # Standard fields for insert
+    df["sky_brightness_mag_arcsec2"] = df["SQMReading"]
+    df["limiting_magnitude"]         = df["LimitingMag"]
+    df["source_type"]   = "imported"
+    df["upload_method"] = "script"
+    df["source_tag"]    = "globe_at_night"
+
+    cols = [
+        "timestamp_utc","latitude","longitude",
+        "sky_brightness_mag_arcsec2","limiting_magnitude",
+        "device_type","source_type","upload_method","source_tag","notes"
+    ]
+    df = df[cols]
+    print("Prepared rows:", len(df))
+
+    # Upsert in chunks (convert NaN -> null)
+    url = f"{SUPABASE_URL}/rest/v1/{TABLE}?on_conflict=timestamp_utc,latitude,longitude,device_type,source_tag"
+    headers = {
+        "apikey": SERVICE_KEY,
+        "Authorization": f"Bearer {SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates"
+    }
+    CHUNK = 500
+    total = 0
+    for i in range(0, len(df), CHUNK):
+        part = df.iloc[i:i+CHUNK]
+        part = part.where(pd.notna(part), None)
+        payload = part.to_dict(orient="records")
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=300)
+        if not resp.ok:
+            raise RuntimeError(f"Upsert error {resp.status_code}: {resp.text[:400]}")
+        total += len(payload)
+    print("✅ Upserted rows:", total)
+
+if __name__ == "__main__":
+    main()
