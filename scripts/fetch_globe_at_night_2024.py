@@ -1,22 +1,61 @@
-name: GaN 2024 Import (monthly upsert)
+import pandas as pd
+import requests
+import io
+import os
+from datetime import datetime
+from dateutil import parser
+from supabase import create_client, Client
 
-on:
-  schedule:
-    - cron: "0 5 2 * *"   # 05:00 UTC on the 2nd of each month
-  workflow_dispatch:      # lets you run it manually from the Actions tab
+# Fetch environment variables from GitHub secrets
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE"]
 
-jobs:
-  import-gan-2024:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install requests pandas python-dateutil
-      - name: Import GaN 2024
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-        run: |
-          python scripts/fetch_globe_at_night_2024.py
+# Connect to Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Download Globe at Night CSV
+url = "https://globeatnight.org/documents/926/GaN2024.csv"
+r = requests.get(url, timeout=120)
+r.raise_for_status()
+
+df = pd.read_csv(io.StringIO(r.text))
+
+# Map columns to our schema
+rows = []
+for _, row in df.iterrows():
+    try:
+        ts = parser.parse(str(row["ObsDateTime"]))
+    except Exception:
+        continue
+    try:
+        lat = float(row["Latitude"])
+        lon = float(row["Longitude"])
+    except Exception:
+        continue
+    sqm = row.get("SQMReading", None)
+    notes_parts = []
+    for field in ["LimitingMag", "CloudCover", "Constellation", "Comments"]:
+        if pd.notna(row.get(field, None)):
+            notes_parts.append(f"{field}: {row[field]}")
+    notes = " | ".join(notes_parts)
+
+    rows.append({
+        "timestamp_utc": ts.isoformat(),
+        "latitude": lat,
+        "longitude": lon,
+        "sky_brightness_mag_arcsec2": float(sqm) if pd.notna(sqm) else None,
+        "device_type": row.get("Device", None),
+        "observer_name": row.get("User", None),
+        "notes": notes,
+        "source_tag": "globe_at_night",
+        "upload_method": "historical_import"
+    })
+
+# Upload in batches
+batch_size = 500
+for i in range(0, len(rows), batch_size):
+    batch = rows[i:i+batch_size]
+    data, count = supabase.table("sqm_readings").upsert(batch).execute()
+    print(f"Upserted batch {i//batch_size + 1}: {len(batch)} records")
+
+print(f"Done. Total rows processed: {len(rows)}")
