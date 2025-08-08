@@ -1,68 +1,67 @@
+import os, io, json, requests
 import pandas as pd
-import requests
-import io
-from datetime import datetime
-from supabase import create_client
-import os
+from dateutil import parser as dtp
 
-# Supabase credentials
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# --- Config from GitHub Action secrets ---
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SERVICE_KEY  = os.environ["SUPABASE_SERVICE_ROLE"]
+TABLE        = "sqm_readings"
 
-# Data source URL
-GAN_URL = "https://globeatnight.org/documents/926/GaN2024.csv"
+# GaN 2024 CSV (UTC date & time columns present)
+GAN_CSV_URL  = "https://globeatnight.org/documents/926/GaN2024.csv"
 
-def build_iso_utc(date_str, time_str):
-    """Combine UTDate + UTTime into ISO8601 UTC timestamp."""
+# Required base columns present in GaN CSV (both visual & SQM rows)
+REQ_COLS = ["UTDate","UTTime","Latitude","Longitude"]
+
+def download_csv(url: str) -> pd.DataFrame:
+    r = requests.get(url, timeout=180)
+    r.raise_for_status()
+    return pd.read_csv(io.StringIO(r.text))
+
+def build_iso_utc(date_str: str, time_str: str) -> str | None:
+    """Combine UTDate + UTTime into ISO-8601 Z."""
+    if pd.isna(date_str) or pd.isna(time_str):
+        return None
+    s = f"{str(date_str).strip()} {str(time_str).strip()} UTC"
     try:
-        return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").isoformat() + "Z"
+        dt = dtp.parse(s)
+        iso = dt.isoformat()
+        if iso.endswith("Z"):
+            return iso
+        return iso.replace("+00:00","Z") if "+00:00" in iso else iso + "Z"
     except Exception:
         return None
 
-def main():
-    print("Downloading GaN 2024…")
-    r = requests.get(GAN_URL)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
+def normalize(df: pd.DataFrame) -> pd.DataFrame:
+    # Ensure required columns
+    for c in REQ_COLS:
+        if c not in df.columns:
+            raise RuntimeError(f"Missing expected column: {c}")
 
-    # Clean column names
-    df.columns = [c.strip() for c in df.columns]
+    df = df.copy()
 
-    # Build timestamp
+    # Coerce numeric fields if present
+    df["SQMReading"]  = pd.to_numeric(df.get("SQMReading"), errors="coerce")
+    df["LimitingMag"] = pd.to_numeric(df.get("LimitingMag"), errors="coerce")
+
+    # Build timestamp & coords
     df["timestamp_utc"] = df.apply(lambda r: build_iso_utc(r.get("UTDate"), r.get("UTTime")), axis=1)
+    df["latitude"]      = pd.to_numeric(df["Latitude"], errors="coerce")
+    df["longitude"]     = pd.to_numeric(df["Longitude"], errors="coerce")
 
-    # Numeric cleaning for SQMReading
-    df["SQMReading"] = pd.to_numeric(df["SQMReading"], errors="coerce")
-    df["sky_brightness_mag_arcsec2"] = df["SQMReading"]
+    # Drop rows missing essentials
+    df = df.dropna(subset=["timestamp_utc","latitude","longitude"])
 
-    # Rename + add metadata
-    df["latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
-    df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
-    df["device_type"] = df["ObsType"]
-    df["source_tag"] = "globe_at_night"
-    df["country"] = df["Country"]
-    df["cloud_cover"] = df["CloudCover"]
+    # Map observables
+    df["sky_brightness_mag_arcsec2"] = df["SQMReading"]       # may be NaN for visual
+    df["limiting_magnitude"]         = df["LimitingMag"]      # may be NaN for SQM
 
-    # Keep only columns your table can accept
-    df_out = df[[
-        "timestamp_utc",
-        "latitude",
-        "longitude",
-        "device_type",
-        "sky_brightness_mag_arcsec2",
-        "source_tag",
-        "country",
-        "cloud_cover"
-    ]]
-
-    # Drop rows with no coords or no timestamp
-    df_out = df_out.dropna(subset=["timestamp_utc", "latitude", "longitude"])
-
-    print(f"Downloaded {len(df)} rows.")
-    print(f"Prepared {len(df_out)} rows for upsert.")
-
-    # Push to Supabase
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-    batch_size = 500
-    for start in range(0, len
+    # Keep values within sane bounds to avoid numeric overflow in DB
+    # (brightness ~8–25, limiting mag ~0–9.9)
+    df = df[
+        (
+            df["sky_brightness_mag_arcsec2"].isna() |
+            ((df["sky_brightness_mag_arcsec2"] >= 8.0) & (df["sky_brightness_mag_arcsec2"] <= 25.0))
+        ) &
+        (
+            df["limiting_magnitude"].isna() |
