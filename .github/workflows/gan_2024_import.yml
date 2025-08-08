@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: pip install pandas requests python-dateutil
 
-      - name: Import GaN 2024 (inline, REST, uses your existing secrets)
+      - name: Import GaN 2024 (inline, REST)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
@@ -41,8 +41,7 @@ jobs:
               try:
                   dt = dtp.parse(s)
                   iso = dt.isoformat()
-                  if iso.endswith("Z"): return iso
-                  return iso.replace("+00:00","Z") if "+00:00" in iso else iso + "Z"
+                  return iso if iso.endswith("Z") else (iso.replace("+00:00","Z") if "+00:00" in iso else iso + "Z")
               except Exception:
                   return None
 
@@ -52,18 +51,14 @@ jobs:
           df = pd.read_csv(io.StringIO(r.text))
           print("Downloaded rows:", len(df))
 
-          # Ensure expected columns
+          # Make sure expected columns are present
           for col in ["UTDate","UTTime","Latitude","Longitude"]:
               if col not in df.columns:
                   raise RuntimeError(f"Missing column: {col}")
 
-          # Build fields
           df = df.copy()
+
+          # Build fields
           df["timestamp_utc"] = [build_iso_utc(d, t) for d, t in zip(df["UTDate"], df["UTTime"])]
           df["latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
-          df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
-          df["SQMReading"]  = pd.to_numeric(df.get("SQMReading"), errors="coerce")
-          df["LimitingMag"] = pd.to_numeric(df.get("LimitingMag"), errors="coerce")
-
-          # Filter essentials + sane ranges
-          m_es_
+          df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce"_
