@@ -16,7 +16,7 @@ def download_csv(url: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(r.text))
 
 def build_iso_utc(date_str: str, time_str: str) -> str | None:
-    if pd.isna(date_str) or pd.isna(time_str): 
+    if pd.isna(date_str) or pd.isna(time_str):
         return None
     s = f"{str(date_str).strip()} {str(time_str).strip()} UTC"
     try:
@@ -39,4 +39,22 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
     # Coerce numerics where present
     if "SQMReading" in df.columns:
-        df["SQMReading"] = pd.to_numeric(df["SQMReading"], error_
+        df["SQMReading"] = pd.to_numeric(df["SQMReading"], errors="coerce")
+    else:
+        df["SQMReading"] = pd.NA
+
+    if "LimitingMag" in df.columns:
+        df["LimitingMag"] = pd.to_numeric(df["LimitingMag"], errors="coerce")
+    else:
+        df["LimitingMag"] = pd.NA
+
+    # Build timestamp + coords
+    df["timestamp_utc"] = df.apply(lambda r: build_iso_utc(r.get("UTDate"), r.get("UTTime")), axis=1)
+    df["latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+
+    # Drop rows missing essentials
+    df = df.dropna(subset=["timestamp_utc","latitude","longitude"])
+
+    # Map observables
+    df["sky_brightness_mag_arcsec2"] = df["SQMRe]()_]()
