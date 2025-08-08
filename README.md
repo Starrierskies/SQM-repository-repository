@@ -124,9 +124,19 @@ This repository will grow into a **multi-source global SQM and limiting magnitud
 
 ---
 
-## 📄 License
+## License
 
-Data licensing will follow the terms of each source dataset. Our aggregated repository will be released under [ODbL](https://opendatacommons.org/licenses/odbl/) to encourage open use with attribution.
+This repository contains both **code** and **data**, each with its own license:
+
+- **Code** (all files outside `/data`): Licensed under the [MIT License](LICENSE).  
+  You are free to use, modify, and distribute the code, but attribution is required.
+
+- **Data** (all files in `/data`): Released under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).  
+  The data is dedicated to the public domain — you may copy, modify, and use it without restriction.
+
+If this project is transferred to another organization (such as DarkSky International),  
+the licensing for both code and data will remain the same unless otherwise noted.
+
 
 ---
 
