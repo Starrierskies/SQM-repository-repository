@@ -1,10 +1,28 @@
-      - run: pip install requests pandas python-dateutil
+name: GaN 2024 Import (monthly upsert)
+
+on:
+  schedule:
+    - cron: "0 5 2 * *"   # 05:00 UTC on the 2nd of each month
+  workflow_dispatch:
+
+jobs:
+  import-gan-2024:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests pandas python-dateutil
+
       - name: Import GaN 2024 (inline)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
         run: |
-          python - << 'PY'
+          python - <<'PY'
           import os, io, json, requests, pandas as pd
           from dateutil import parser as dtp
 
@@ -31,25 +49,22 @@
           df = pd.read_csv(io.StringIO(r.text))
           print("Downloaded rows:", len(df))
 
-          # Basic columns
+          # Ensure expected columns
           for col in ["UTDate","UTTime","Latitude","Longitude"]:
               if col not in df.columns: raise RuntimeError(f"Missing column: {col}")
 
+          # Build fields
           df = df.copy()
           df["timestamp_utc"] = [build_iso_utc(d, t) for d, t in zip(df["UTDate"], df["UTTime"])]
           df["latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
           df["longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
-
-          # Observables
           df["SQMReading"]  = pd.to_numeric(df.get("SQMReading"), errors="coerce")
           df["LimitingMag"] = pd.to_numeric(df.get("LimitingMag"), errors="coerce")
 
-          # Essential mask
+          # Filter essentials + sane ranges
           m_ess = df["timestamp_utc"].notna() & df["latitude"].notna() & df["longitude"].notna()
-          # Reasonable ranges (avoid numeric overflow)
           m_bri = df["SQMReading"].isna()  | ((df["SQMReading"]  >= 8.0) & (df["SQMReading"]  <= 25.0))
           m_lim = df["LimitingMag"].isna() | ((df["LimitingMag"] >= 0.0) & (df["LimitingMag"] <= 9.9))
-
           df = df[m_ess & m_bri & m_lim].reset_index(drop=True)
 
           # Device type
@@ -70,7 +85,7 @@
               return "; ".join(parts) if parts else None
           df["notes"] = df.apply(mk_notes, axis=1) if note_fields else None
 
-          # Standard fields
+          # Standard fields for insert
           df["sky_brightness_mag_arcsec2"] = df["SQMReading"]
           df["limiting_magnitude"]         = df["LimitingMag"]
           df["source_type"]   = "imported"
